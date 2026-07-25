@@ -16,6 +16,9 @@ export default async function TrackPage({
         orderBy: { index: "asc" },
         include: { tasks: { orderBy: { order: "asc" } } },
       },
+      notesList: {
+        orderBy: { createdAt: "asc" },
+      },
     },
   });
 

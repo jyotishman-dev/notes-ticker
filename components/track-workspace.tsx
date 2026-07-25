@@ -26,7 +26,9 @@ import {
   FileEdit,
   PlusCircle,
   X,
-  Settings
+  Settings,
+  Download,
+  ClipboardList
 } from "lucide-react";
 import {
   toggleTask,
@@ -39,7 +41,11 @@ import {
   deletePhase,
   updateTrackNotes,
   updateTrack,
-  deleteTrack
+  deleteTrack,
+  addNote,
+  updateNoteTitle,
+  updateNoteContent,
+  deleteNote
 } from "@/lib/actions";
 import { cn } from "@/lib/utils";
 
@@ -63,6 +69,15 @@ interface ClientPhase {
   tasks: ClientTask[];
 }
 
+interface ClientNote {
+  id: string;
+  trackId: string;
+  title: string;
+  content: string;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
 interface ClientTrack {
   id: string;
   name: string;
@@ -70,6 +85,7 @@ interface ClientTrack {
   color: string;
   notes: string | null;
   phases: ClientPhase[];
+  notesList: ClientNote[];
 }
 
 const COLOR_THEMES: Record<string, { dot: string; bg: string; text: string; border: string; glow: string }> = {
@@ -189,7 +205,7 @@ export function TrackWorkspace({ initialTrack }: { initialTrack: any }) {
   const router = useRouter();
   // 1. Client State
   const [track, setTrack] = useState<ClientTrack>(initialTrack);
-  const [activeNote, setActiveNote] = useState<{ type: "track" | "task"; id: string }>({
+  const [activeNote, setActiveNote] = useState<{ type: "track" | "task" | "custom"; id: string }>({
     type: "track",
     id: initialTrack.id
   });
@@ -212,6 +228,10 @@ export function TrackWorkspace({ initialTrack }: { initialTrack: any }) {
   const [newPhaseTitle, setNewPhaseTitle] = useState("");
   const [newPhaseConcept, setNewPhaseConcept] = useState("");
 
+  // New Note states
+  const [isAddingNote, setIsAddingNote] = useState(false);
+  const [newNoteTitle, setNewNoteTitle] = useState("");
+
   // Track settings states
   const [trackSettingsName, setTrackSettingsName] = useState(track.name);
   const [trackSettingsCategory, setTrackSettingsCategory] = useState(track.category);
@@ -230,15 +250,18 @@ export function TrackWorkspace({ initialTrack }: { initialTrack: any }) {
   useEffect(() => {
     if (activeNote.type === "track") {
       setEditorText(track.notes || "");
+    } else if (activeNote.type === "custom") {
+      const customNote = track.notesList?.find((n) => n.id === activeNote.id);
+      setEditorText(customNote ? customNote.content : "");
     } else {
       // Find task notes
       let foundNotes = "";
       for (const phase of track.phases) {
-        const task = phase.tasks.find((t) => t.id === activeNote.id);
-        if (task) {
-          foundNotes = task.notes || "";
-          break;
-        }
+         const task = phase.tasks.find((t) => t.id === activeNote.id);
+         if (task) {
+           foundNotes = task.notes || "";
+           break;
+         }
       }
       setEditorText(foundNotes);
     }
@@ -249,10 +272,12 @@ export function TrackWorkspace({ initialTrack }: { initialTrack: any }) {
   }, [activeNote, track.id]);
 
   // Save note immediately without debounce
-  const saveCurrentNote = async (type: "track" | "task", id: string, val: string) => {
+  const saveCurrentNote = async (type: "track" | "task" | "custom", id: string, val: string) => {
     try {
       if (type === "track") {
         await updateTrackNotes(id, val || null);
+      } else if (type === "custom") {
+        await updateNoteContent(id, val);
       } else {
         await updateTaskNotes(id, val || null);
       }
@@ -263,7 +288,7 @@ export function TrackWorkspace({ initialTrack }: { initialTrack: any }) {
     }
   };
 
-  const handleSelectNote = async (type: "track" | "task", id: string) => {
+  const handleSelectNote = async (type: "track" | "task" | "custom", id: string) => {
     if (activeNote.type === type && activeNote.id === id) return;
 
     if (saveTimeoutRef.current) {
@@ -285,6 +310,11 @@ export function TrackWorkspace({ initialTrack }: { initialTrack: any }) {
     // Update local state instantly so switching notes or searching sees the latest text
     if (activeNote.type === "track") {
       setTrack((prev) => ({ ...prev, notes: val }));
+    } else if (activeNote.type === "custom") {
+      setTrack((prev) => ({
+        ...prev,
+        notesList: prev.notesList.map((n) => (n.id === activeNote.id ? { ...n, content: val } : n))
+      }));
     } else {
       setTrack((prev) => {
         const nextPhases = prev.phases.map((p) => ({
@@ -305,6 +335,8 @@ export function TrackWorkspace({ initialTrack }: { initialTrack: any }) {
       try {
         if (activeNote.type === "track") {
           await updateTrackNotes(track.id, val || null);
+        } else if (activeNote.type === "custom") {
+          await updateNoteContent(activeNote.id, val);
         } else {
           await updateTaskNotes(activeNote.id, val || null);
         }
@@ -558,6 +590,145 @@ export function TrackWorkspace({ initialTrack }: { initialTrack: any }) {
     }
   };
 
+  // Note handlers
+  const handleAddNote = async () => {
+    if (!newNoteTitle.trim()) return;
+    const tempId = `temp-note-${Date.now()}`;
+    const newNoteObj: ClientNote = {
+      id: tempId,
+      trackId: track.id,
+      title: newNoteTitle.trim(),
+      content: "",
+      createdAt: new Date(),
+      updatedAt: new Date()
+    };
+    setTrack((prev) => ({
+      ...prev,
+      notesList: [...(prev.notesList || []), newNoteObj]
+    }));
+    setIsAddingNote(false);
+    setNewNoteTitle("");
+
+    try {
+      const createdNote = await addNote(track.id, newNoteObj.title);
+      if (createdNote) {
+        setTrack((prev) => ({
+          ...prev,
+          notesList: (prev.notesList || []).map((n) => (n.id === tempId ? { ...n, id: createdNote.id } : n))
+        }));
+        setActiveNote({ type: "custom", id: createdNote.id });
+      }
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  const handleDeleteNote = (noteId: string) => {
+    if (activeNote.type === "custom" && activeNote.id === noteId) {
+      setActiveNote({ type: "track", id: track.id });
+    }
+    setTrack((prev) => ({
+      ...prev,
+      notesList: (prev.notesList || []).filter((n) => n.id !== noteId)
+    }));
+    startTransition(async () => {
+      await deleteNote(noteId);
+    });
+  };
+
+  const handleRenameNote = (noteId: string, newTitle: string) => {
+    if (!newTitle.trim()) return;
+    setTrack((prev) => ({
+      ...prev,
+      notesList: (prev.notesList || []).map((n) => (n.id === noteId ? { ...n, title: newTitle.trim() } : n))
+    }));
+    startTransition(async () => {
+      await updateNoteTitle(noteId, newTitle);
+    });
+  };
+
+  // Export & Extractor functions
+  const [extractedTasks, setExtractedTasks] = useState<string[]>([]);
+  const [showExtractorModal, setShowExtractorModal] = useState(false);
+  const [extractorTargetPhaseId, setExtractorTargetPhaseId] = useState("");
+  const [selectedExtractedTasks, setSelectedExtractedTasks] = useState<Record<number, boolean>>({});
+
+  const handleExportMarkdown = () => {
+    if (!editorText) return;
+    const blob = new Blob([editorText], { type: "text/markdown;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    const filename = `${track.name}_${activeNoteTitle.replace(/\s+/g, "_")}.md`;
+    link.setAttribute("download", filename);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  };
+
+  const handleOpenExtractor = () => {
+    if (!editorText.trim()) {
+      alert("Write some notes with task lists first! The extractor looks for lines starting with '- [ ]', '- ', '* ', or numbers.");
+      return;
+    }
+
+    const lines = editorText.split("\n");
+    const tasksFound: string[] = [];
+    for (const line of lines) {
+      // Look for lines starting with checklists: - [ ] content
+      const checkMatch = line.match(/^(\s*[-*+]\s\[[ ]\])\s*(.*)/);
+      // Or general list items: - content or * content (ignore if it's check list item like - [x] or - [ ])
+      const listMatch = line.match(/^(\s*[-*+])\s*(?!\[[ xX]\])(.*)/);
+      // Or ordered lists: 1. content
+      const numMatch = line.match(/^(\s*\d+\.)\s*(.*)/);
+
+      if (checkMatch && checkMatch[2].trim()) {
+        tasksFound.push(checkMatch[2].trim());
+      } else if (listMatch && listMatch[2].trim()) {
+        tasksFound.push(listMatch[2].trim());
+      } else if (numMatch && numMatch[2].trim()) {
+        tasksFound.push(numMatch[2].trim());
+      }
+    }
+
+    if (tasksFound.length === 0) {
+      alert("No checklist or list items found in the current note content. Try adding some items like '- [ ] Task 1' or '- Task 2'.");
+      return;
+    }
+
+    setExtractedTasks(tasksFound);
+    const initialSelection: Record<number, boolean> = {};
+    tasksFound.forEach((_, idx) => {
+      initialSelection[idx] = true;
+    });
+    setSelectedExtractedTasks(initialSelection);
+    if (track.phases.length > 0) {
+      setExtractorTargetPhaseId(track.phases[0].id);
+    }
+    setShowExtractorModal(true);
+  };
+
+  const handleImportExtractedTasks = async () => {
+    if (!extractorTargetPhaseId) {
+      alert("Please add/select a Phase to import tasks into.");
+      return;
+    }
+
+    const tasksToImport = extractedTasks.filter((_, idx) => selectedExtractedTasks[idx]);
+    if (tasksToImport.length === 0) {
+      alert("No tasks selected.");
+      return;
+    }
+
+    // Add tasks
+    for (const taskContent of tasksToImport) {
+      await handleAddTask(extractorTargetPhaseId, taskContent);
+    }
+
+    setShowExtractorModal(false);
+  };
+
   // 5. Text insertion helper (for markdown toolbar and templates)
   const insertTextAtCursor = (before: string, after: string = "") => {
     const textarea = textareaRef.current;
@@ -682,6 +853,11 @@ export function TrackWorkspace({ initialTrack }: { initialTrack: any }) {
   // 6. Navigation items
   const activeNoteTitle = activeNote.type === "track"
     ? "General Notes"
+    : activeNote.type === "custom"
+    ? (() => {
+        const n = (track.notesList || []).find((x) => x.id === activeNote.id);
+        return n ? n.title : "Notes";
+      })()
     : (() => {
         for (const phase of track.phases) {
           const t = phase.tasks.find((t) => t.id === activeNote.id);
@@ -699,6 +875,8 @@ export function TrackWorkspace({ initialTrack }: { initialTrack: any }) {
         }
         return "";
       })()
+    : activeNote.type === "custom"
+    ? "Custom Documents"
     : "";
 
   // Statistics
@@ -707,7 +885,9 @@ export function TrackWorkspace({ initialTrack }: { initialTrack: any }) {
   const doneTasks = allTasks.filter((t) => t.completed).length;
   const completionPct = totalTasks > 0 ? Math.round((doneTasks / totalTasks) * 100) : 0;
   
-  const notesCount = (track.notes ? 1 : 0) + allTasks.filter((t) => t.notes).length;
+  const notesCount = (track.notes ? 1 : 0) + 
+    (track.notesList ? track.notesList.length : 0) + 
+    allTasks.filter((t) => t.notes).length;
 
   // Filtered sidebar structure for search
   const matchesSearch = (text: string) => {
@@ -819,6 +999,119 @@ export function TrackWorkspace({ initialTrack }: { initialTrack: any }) {
               </button>
             </div>
           ) : null}
+
+          {/* Section: Custom Documents */}
+          <div>
+            <div className="px-2 pb-1 flex items-center justify-between text-[10px] font-mono uppercase tracking-wider text-muted">
+              <span>Documents & Logs</span>
+              <button
+                onClick={() => setIsAddingNote(true)}
+                className="hover:text-zinc-200 transition-colors flex items-center gap-0.5 text-[9px] px-1 py-0.2 rounded border border-border bg-[#0a0a0c]"
+              >
+                <Plus className="h-2.5 w-2.5" />
+                Add
+              </button>
+            </div>
+
+            {isAddingNote && (
+              <div className="mt-1.5 p-2 rounded-lg border border-border bg-panel space-y-1.5">
+                <input
+                  type="text"
+                  placeholder="Document Title (e.g. Setup Spec)"
+                  value={newNoteTitle}
+                  onChange={(e) => setNewNoteTitle(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") handleAddNote();
+                    if (e.key === "Escape") setIsAddingNote(false);
+                  }}
+                  className="w-full px-2 py-1 rounded bg-base text-xs border border-border focus:border-zinc-500 focus:outline-none"
+                  autoFocus
+                />
+                <div className="flex justify-end gap-1 text-[9px]">
+                  <button
+                    onClick={() => setIsAddingNote(false)}
+                    className="px-2 py-0.5 text-muted hover:text-zinc-200"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={handleAddNote}
+                    disabled={!newNoteTitle.trim()}
+                    className="px-2 py-0.5 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white rounded font-medium"
+                  >
+                    Create
+                  </button>
+                </div>
+              </div>
+            )}
+
+            <div className="space-y-1 mt-1.5">
+              {(track.notesList || []).map((note) => {
+                const noteMatches =
+                  matchesSearch(note.title) ||
+                  matchesSearch(note.content);
+
+                if (hasSearchMatches && !noteMatches) return null;
+
+                const isSelected = activeNote.type === "custom" && activeNote.id === note.id;
+
+                return (
+                  <div
+                    key={note.id}
+                    className={cn(
+                      "flex items-center justify-between group/note pl-2 pr-1 py-1.5 rounded-md text-xs transition-all",
+                      isSelected
+                        ? "bg-panel border border-border text-zinc-100 font-medium"
+                        : "text-muted hover:bg-panel/30 hover:text-zinc-200 border border-transparent"
+                    )}
+                  >
+                    <button
+                      onClick={() => handleSelectNote("custom", note.id)}
+                      className="truncate text-left flex-1 py-0.5 flex items-center gap-2 min-w-0"
+                    >
+                      <NotebookPen className={cn("h-3.5 w-3.5 shrink-0", isSelected ? theme.text : "text-muted")} />
+                      <span className="truncate block flex-1">{note.title}</span>
+                      {hasSearchMatches && getSearchSnippet(note.content, searchQuery) && (
+                        <span className="block text-[10px] text-amber-400/80 font-mono mt-0.5 truncate font-normal">
+                          matched: "{getSearchSnippet(note.content, searchQuery)}"
+                        </span>
+                      )}
+                    </button>
+
+                    <div className="opacity-0 group-hover/note:opacity-100 flex items-center transition-opacity shrink-0">
+                      <button
+                        onClick={() => {
+                          const nextName = prompt("Rename Document:", note.title);
+                          if (nextName) handleRenameNote(note.id, nextName);
+                        }}
+                        className="p-1 text-muted hover:text-zinc-200 rounded"
+                        title="Rename Document"
+                      >
+                        <Edit3 className="h-3 w-3" />
+                      </button>
+                      <button
+                        onClick={() => {
+                          if (confirm(`Are you sure you want to permanently delete "${note.title}"?`)) {
+                            handleDeleteNote(note.id);
+                          }
+                        }}
+                        className="p-1 text-muted hover:text-red-400 rounded"
+                        title="Delete Document"
+                      >
+                        <Trash2 className="h-3 w-3" />
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+
+              {(!track.notesList || track.notesList.length === 0) && (
+                <div className="text-[10px] text-muted/60 italic text-center py-2 px-1">
+                  No custom documents.
+                </div>
+              )}
+            </div>
+          </div>
 
           {/* Section: Phases & Checklist */}
           <div>
@@ -1067,6 +1360,26 @@ export function TrackWorkspace({ initialTrack }: { initialTrack: any }) {
               {saveStatus === "error" && (
                 <span className="text-red-400 font-medium">Error saving!</span>
               )}
+            </div>
+
+            {/* Task Extractor & Export */}
+            <div className="flex items-center gap-1.5">
+              <button
+                onClick={handleOpenExtractor}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-emerald-950/40 hover:bg-emerald-900/60 border border-emerald-500/20 text-emerald-400 rounded-lg text-xs font-medium transition-all shadow-sm"
+                title="Extract checklist items from your markdown note"
+              >
+                <ClipboardList className="h-3.5 w-3.5" />
+                <span className="hidden sm:inline">Extract Tasks</span>
+              </button>
+              <button
+                onClick={handleExportMarkdown}
+                disabled={!editorText}
+                className="p-2 border border-border rounded-lg bg-panel hover:bg-zinc-800 text-muted hover:text-zinc-200 transition-colors disabled:opacity-40"
+                title="Export as Markdown (.md)"
+              >
+                <Download className="h-4 w-4" />
+              </button>
             </div>
 
             {/* Split / Edit / Preview Tabs */}
@@ -1353,6 +1666,96 @@ export function TrackWorkspace({ initialTrack }: { initialTrack: any }) {
                   Save Settings
                 </button>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* DIALOG: TASK EXTRACTOR MODAL */}
+      {showExtractorModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+          <div className="w-full max-w-lg rounded-lg border border-border bg-panel p-6 shadow-2xl flex flex-col max-h-[85vh]">
+            <div className="flex items-center justify-between border-b border-border pb-3">
+              <div className="flex items-center gap-2">
+                <ClipboardList className="h-5 w-5 text-emerald-400" />
+                <h3 className="text-base font-bold text-zinc-100">Extract Tasks from Notes</h3>
+              </div>
+              <button onClick={() => setShowExtractorModal(false)} className="text-muted hover:text-zinc-200">
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <p className="text-xs text-muted mt-2">
+              We found the following list items in your note. Select which ones you want to import into your checklist and choose the target phase.
+            </p>
+
+            {/* List of found tasks */}
+            <div className="mt-4 flex-1 overflow-y-auto space-y-2 border border-border/60 bg-[#0a0a0c]/60 p-3 rounded-lg custom-scrollbar max-h-[40vh]">
+              {extractedTasks.map((task, idx) => {
+                const checked = selectedExtractedTasks[idx] ?? false;
+                return (
+                  <label
+                    key={idx}
+                    className={cn(
+                      "flex items-start gap-2.5 p-2 rounded-md border text-xs cursor-pointer transition-all",
+                      checked
+                        ? "border-emerald-500/30 bg-emerald-500/5 text-zinc-100"
+                        : "border-border bg-transparent text-muted hover:text-zinc-300"
+                    )}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      onChange={(e) =>
+                        setSelectedExtractedTasks((prev) => ({ ...prev, [idx]: e.target.checked }))
+                      }
+                      className="rounded border-zinc-700 bg-zinc-800 text-emerald-500 focus:ring-emerald-500 h-4 w-4 mt-0.5 shrink-0"
+                    />
+                    <span>{task}</span>
+                  </label>
+                );
+              })}
+            </div>
+
+            {/* Target Phase Selector */}
+            <div className="mt-4">
+              <label className="text-[10px] font-mono uppercase tracking-wider text-muted block mb-1">
+                Target Gauntlet Phase
+              </label>
+              {track.phases.length > 0 ? (
+                <select
+                  value={extractorTargetPhaseId}
+                  onChange={(e) => setExtractorTargetPhaseId(e.target.value)}
+                  className="w-full rounded-md border border-border bg-base px-3 py-2 text-xs text-zinc-200 focus:border-zinc-500 focus:outline-none"
+                >
+                  {track.phases.map((phase) => (
+                    <option key={phase.id} value={phase.id}>
+                      Phase {phase.index}: {phase.title}
+                    </option>
+                  ))}
+                </select>
+              ) : (
+                <div className="text-xs text-amber-400 bg-amber-950/20 border border-amber-900/30 p-2 rounded">
+                  Please create a Phase in the sidebar first.
+                </div>
+              )}
+            </div>
+
+            <div className="mt-6 pt-4 border-t border-border flex justify-end gap-2 text-xs">
+              <button
+                onClick={() => setShowExtractorModal(false)}
+                className="px-4 py-2 border border-border rounded-lg text-muted hover:text-zinc-200 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleImportExtractedTasks}
+                disabled={!extractorTargetPhaseId || !Object.values(selectedExtractedTasks).some(Boolean)}
+                className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white font-medium rounded-lg disabled:opacity-50 transition-colors flex items-center gap-1.5"
+              >
+                <Plus className="h-3.5 w-3.5" />
+                <span>Import selected items</span>
+              </button>
             </div>
           </div>
         </div>

@@ -130,3 +130,43 @@ export async function deleteTrack(trackId: string) {
   });
   revalidatePath("/", "layout");
 }
+
+export async function addNote(trackId: string, title: string, content: string = "") {
+  if (!title.trim()) return;
+  const note = await prisma.note.create({
+    data: {
+      trackId,
+      title: title.trim(),
+      content,
+    },
+  });
+  revalidatePath("/", "layout");
+  return note;
+}
+
+export async function updateNoteTitle(noteId: string, title: string) {
+  if (!title.trim()) return;
+  const note = await prisma.note.update({
+    where: { id: noteId },
+    data: { title: title.trim() },
+  });
+  revalidatePath("/", "layout");
+  return note;
+}
+
+export async function updateNoteContent(noteId: string, content: string | null) {
+  const note = await prisma.note.update({
+    where: { id: noteId },
+    data: { content: content || "" },
+  });
+  revalidatePath("/", "layout");
+  return note;
+}
+
+export async function deleteNote(noteId: string) {
+  await prisma.note.delete({
+    where: { id: noteId },
+  });
+  revalidatePath("/", "layout");
+}
+
