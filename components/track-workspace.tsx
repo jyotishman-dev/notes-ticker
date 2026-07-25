@@ -2,6 +2,7 @@
 
 import React, { useState, useEffect, useRef, useTransition } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import {
   ArrowLeft,
   BookOpen,
@@ -37,7 +38,8 @@ import {
   updatePhase,
   deletePhase,
   updateTrackNotes,
-  updateTrack
+  updateTrack,
+  deleteTrack
 } from "@/lib/actions";
 import { cn } from "@/lib/utils";
 
@@ -184,6 +186,7 @@ const getSearchSnippet = (text: string | null, query: string): string | null => 
 };
 
 export function TrackWorkspace({ initialTrack }: { initialTrack: any }) {
+  const router = useRouter();
   // 1. Client State
   const [track, setTrack] = useState<ClientTrack>(initialTrack);
   const [activeNote, setActiveNote] = useState<{ type: "track" | "task"; id: string }>({
@@ -543,6 +546,16 @@ export function TrackWorkspace({ initialTrack }: { initialTrack: any }) {
     startTransition(async () => {
       await updateTrack(track.id, trackSettingsName, trackSettingsCategory, trackSettingsColor);
     });
+  };
+
+  const handleDeleteTrack = () => {
+    if (confirm(`Are you sure you want to permanently delete "${track.name}"? This action cannot be undone and will delete all phases, tasks, and notes.`)) {
+      setShowSettings(false);
+      startTransition(async () => {
+        await deleteTrack(track.id);
+        router.push("/");
+      });
+    }
   };
 
   // 5. Text insertion helper (for markdown toolbar and templates)
@@ -1318,20 +1331,28 @@ export function TrackWorkspace({ initialTrack }: { initialTrack: any }) {
               </div>
             </div>
 
-            <div className="mt-6 pt-4 border-t border-border flex justify-end gap-2 text-xs">
+            <div className="mt-6 pt-4 border-t border-border flex items-center justify-between gap-2 text-xs">
               <button
-                onClick={() => setShowSettings(false)}
-                className="px-4 py-2 border border-border rounded-lg text-muted hover:text-zinc-200 transition-colors"
+                onClick={handleDeleteTrack}
+                className="px-4 py-2 bg-red-950/45 hover:bg-red-900/60 border border-red-900/40 text-red-400 font-medium rounded-lg transition-colors"
               >
-                Cancel
+                Delete Gauntlet
               </button>
-              <button
-                onClick={handleSaveTrackSettings}
-                disabled={!trackSettingsName.trim()}
-                className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white font-medium rounded-lg disabled:opacity-50 transition-colors"
-              >
-                Save Settings
-              </button>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => setShowSettings(false)}
+                  className="px-4 py-2 border border-border rounded-lg text-muted hover:text-zinc-200 transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={handleSaveTrackSettings}
+                  disabled={!trackSettingsName.trim()}
+                  className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white font-medium rounded-lg disabled:opacity-50 transition-colors"
+                >
+                  Save Settings
+                </button>
+              </div>
             </div>
           </div>
         </div>

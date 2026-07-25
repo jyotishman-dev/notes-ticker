@@ -7,51 +7,43 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-// A learning track / "gauntlet" — top level thing you're pursuing
 model Track {
-  id        String   @id @default(cuid())
+  id        String    @id @default(cuid())
   name      String
-  category  String   @default("General")
-  color     String   @default("emerald") // dot color: emerald | amber | cyan | pink | violet
-  notes     String?  @db.Text
-  order     Int      @default(0)
-  createdAt DateTime @default(now())
-
-  phases   Phase[]
-  sessions Session[]
+  category  String    @default("General")
+  color     String    @default("emerald")
+  order     Int       @default(0)
+  createdAt DateTime  @default(now())
+  notes     String?
+  phases    Phase[]
+  sessions  Session[]
 }
 
-// A phase groups a set of tasks within a track (P0, P1, P2...)
 model Phase {
   id      String  @id @default(cuid())
   trackId String
-  track   Track   @relation(fields: [trackId], references: [id], onDelete: Cascade)
-
-  index   Int // display order, e.g. 0, 1, 2 -> "P0", "P1"
+  index   Int
   title   String
-  concept String? // short blurb shown under the phase title
-
-  tasks Task[]
+  concept String?
+  track   Track   @relation(fields: [trackId], references: [id], onDelete: Cascade)
+  tasks   Task[]
 }
 
-// A single task/checklist item — this is where notes live
 model Task {
-  id      String @id @default(cuid())
-  phaseId String
-  phase   Phase  @relation(fields: [phaseId], references: [id], onDelete: Cascade)
-
+  id          String    @id @default(cuid())
+  phaseId     String
   content     String
-  notes       String?   @db.Text // free-form notes about what you actually did
+  notes       String?
   completed   Boolean   @default(false)
   completedAt DateTime?
   order       Int       @default(0)
+  phase       Phase     @relation(fields: [phaseId], references: [id], onDelete: Cascade)
 }
 
-// A logged work session against a track, used to compute total time / streaks
 model Session {
   id              String   @id @default(cuid())
   trackId         String
-  track           Track    @relation(fields: [trackId], references: [id], onDelete: Cascade)
   startedAt       DateTime @default(now())
   durationSeconds Int      @default(0)
+  track           Track    @relation(fields: [trackId], references: [id], onDelete: Cascade)
 }

@@ -123,3 +123,10 @@ export async function createTrack(name: string, category: string, color: string)
   revalidatePath("/", "layout");
   return track.id;
 }
+
+export async function deleteTrack(trackId: string) {
+  await prisma.track.delete({
+    where: { id: trackId },
+  });
+  revalidatePath("/", "layout");
+}
