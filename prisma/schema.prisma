@@ -8,26 +8,41 @@ datasource db {
 }
 
 model Track {
-  id        String    @id @default(cuid())
-  name      String
-  category  String    @default("General")
-  color     String    @default("emerald")
-  order     Int       @default(0)
-  createdAt DateTime  @default(now())
-  notes     String?
-  phases    Phase[]
-  sessions  Session[]
-  notesList Note[]
+  id          String       @id @default(cuid())
+  name        String
+  category    String       @default("General")
+  color       String       @default("emerald")
+  order       Int          @default(0)
+  pinned      Boolean      @default(false)
+  createdAt   DateTime     @default(now())
+  notes       String?
+  phases      Phase[]
+  sessions    Session[]
+  notesList   Note[]
+  noteFolders NoteFolder[]
 }
 
-model Note {
+model NoteFolder {
   id        String   @id @default(cuid())
   trackId   String
   title     String
-  content   String   @default("")
+  order     Int      @default(0)
   createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
   track     Track    @relation(fields: [trackId], references: [id], onDelete: Cascade)
+  notes     Note[]
+}
+
+model Note {
+  id        String      @id @default(cuid())
+  trackId   String
+  folderId  String?
+  title     String
+  content   String      @default("")
+  order     Int         @default(0)
+  createdAt DateTime    @default(now())
+  updatedAt DateTime    @updatedAt
+  track     Track       @relation(fields: [trackId], references: [id], onDelete: Cascade)
+  folder    NoteFolder? @relation(fields: [folderId], references: [id], onDelete: SetNull)
 }
 
 model Phase {

@@ -22,13 +22,21 @@ import {
   Loader2,
   Sparkles,
   ChevronDown,
+  ChevronRight,
   LayoutGrid,
   FileEdit,
   PlusCircle,
   X,
   Settings,
   Download,
-  ClipboardList
+  ClipboardList,
+  Command,
+  History,
+  RotateCcw,
+  FileClock,
+  Folder,
+  FolderOpen,
+  FolderPlus,
 } from "lucide-react";
 import {
   toggleTask,
@@ -36,16 +44,18 @@ import {
   updateTaskContent,
   deleteTask,
   addTask,
-  addPhase,
-  updatePhase,
-  deletePhase,
   updateTrackNotes,
   updateTrack,
   deleteTrack,
   addNote,
   updateNoteTitle,
   updateNoteContent,
-  deleteNote
+  deleteNote,
+  togglePin,
+  createNoteFolder,
+  updateNoteFolder,
+  deleteNoteFolder,
+  moveNoteToFolder,
 } from "@/lib/actions";
 import { cn } from "@/lib/utils";
 
@@ -72,10 +82,20 @@ interface ClientPhase {
 interface ClientNote {
   id: string;
   trackId: string;
+  folderId: string | null;
   title: string;
   content: string;
+  order: number;
   createdAt: Date;
   updatedAt: Date;
+}
+
+interface ClientNoteFolder {
+  id: string;
+  trackId: string;
+  title: string;
+  order: number;
+  notes: ClientNote[];
 }
 
 interface ClientTrack {
@@ -85,7 +105,8 @@ interface ClientTrack {
   color: string;
   notes: string | null;
   phases: ClientPhase[];
-  notesList: ClientNote[];
+  notesList: ClientNote[];     // unfiled notes
+  noteFolders: ClientNoteFolder[];
 }
 
 const COLOR_THEMES: Record<string, { dot: string; bg: string; text: string; border: string; glow: string }> = {
@@ -220,22 +241,35 @@ export function TrackWorkspace({ initialTrack }: { initialTrack: any }) {
   const [searchQuery, setSearchQuery] = useState("");
   const [showSettings, setShowSettings] = useState(false);
   
-  // Modal states for creating/editing phases & tracks
-  const [editingPhaseId, setEditingPhaseId] = useState<string | null>(null);
-  const [phaseModalTitle, setPhaseModalTitle] = useState("");
-  const [phaseModalConcept, setPhaseModalConcept] = useState("");
-  const [isAddingPhase, setIsAddingPhase] = useState(false);
-  const [newPhaseTitle, setNewPhaseTitle] = useState("");
-  const [newPhaseConcept, setNewPhaseConcept] = useState("");
-
   // New Note states
   const [isAddingNote, setIsAddingNote] = useState(false);
   const [newNoteTitle, setNewNoteTitle] = useState("");
+  const [addingNoteToFolderId, setAddingNoteToFolderId] = useState<string | null>(null); // null = unfiled
+
+  // Folder states
+  const [isAddingFolder, setIsAddingFolder] = useState(false);
+  const [newFolderTitle, setNewFolderTitle] = useState("");
+  const [expandedFolders, setExpandedFolders] = useState<Set<string>>(
+    () => new Set(initialTrack.noteFolders?.map((f: any) => f.id) ?? [])
+  );
+  const [renamingFolderId, setRenamingFolderId] = useState<string | null>(null);
+  const [renameFolderTitle, setRenameFolderTitle] = useState("");
 
   // Track settings states
   const [trackSettingsName, setTrackSettingsName] = useState(track.name);
   const [trackSettingsCategory, setTrackSettingsCategory] = useState(track.category);
   const [trackSettingsColor, setTrackSettingsColor] = useState(track.color);
+
+  // Command Palette state
+  const [showCommandPalette, setShowCommandPalette] = useState(false);
+  const [commandQuery, setCommandQuery] = useState("");
+  const commandInputRef = useRef<HTMLInputElement>(null);
+
+  // Version History state: Record<noteKey, Array<{timestamp, content}>>
+  // noteKey = "track" | noteId | taskId
+  const [versionHistory, setVersionHistory] = useState<Record<string, Array<{ timestamp: Date; content: string; label: string }>>>({}); 
+  const [showHistoryModal, setShowHistoryModal] = useState(false);
+  const [selectedHistoryIdx, setSelectedHistoryIdx] = useState<number | null>(null);
 
   // Transitions
   const [, startTransition] = useTransition();
@@ -251,17 +285,24 @@ export function TrackWorkspace({ initialTrack }: { initialTrack: any }) {
     if (activeNote.type === "track") {
       setEditorText(track.notes || "");
     } else if (activeNote.type === "custom") {
-      const customNote = track.notesList?.find((n) => n.id === activeNote.id);
-      setEditorText(customNote ? customNote.content : "");
+      // Search unfiled notes first
+      const unfiled = track.notesList?.find((n) => n.id === activeNote.id);
+      if (unfiled) {
+        setEditorText(unfiled.content);
+      } else {
+        // Search inside folders
+        let found = "";
+        for (const folder of (track.noteFolders || [])) {
+          const n = folder.notes.find((n) => n.id === activeNote.id);
+          if (n) { found = n.content; break; }
+        }
+        setEditorText(found);
+      }
     } else {
-      // Find task notes
       let foundNotes = "";
       for (const phase of track.phases) {
          const task = phase.tasks.find((t) => t.id === activeNote.id);
-         if (task) {
-           foundNotes = task.notes || "";
-           break;
-         }
+         if (task) { foundNotes = task.notes || ""; break; }
       }
       setEditorText(foundNotes);
     }
@@ -311,10 +352,21 @@ export function TrackWorkspace({ initialTrack }: { initialTrack: any }) {
     if (activeNote.type === "track") {
       setTrack((prev) => ({ ...prev, notes: val }));
     } else if (activeNote.type === "custom") {
-      setTrack((prev) => ({
-        ...prev,
-        notesList: prev.notesList.map((n) => (n.id === activeNote.id ? { ...n, content: val } : n))
-      }));
+      setTrack((prev) => {
+        // Check unfiled notes
+        const inUnfiled = prev.notesList.some((n) => n.id === activeNote.id);
+        if (inUnfiled) {
+          return { ...prev, notesList: prev.notesList.map((n) => (n.id === activeNote.id ? { ...n, content: val } : n)) };
+        }
+        // Check folder notes
+        return {
+          ...prev,
+          noteFolders: (prev.noteFolders || []).map((f) => ({
+            ...f,
+            notes: f.notes.map((n) => (n.id === activeNote.id ? { ...n, content: val } : n)),
+          })),
+        };
+      });
     } else {
       setTrack((prev) => {
         const nextPhases = prev.phases.map((p) => ({
@@ -325,20 +377,33 @@ export function TrackWorkspace({ initialTrack }: { initialTrack: any }) {
       });
     }
 
-    // Clear previous timeout
-    if (saveTimeoutRef.current) {
-      clearTimeout(saveTimeoutRef.current);
-    }
+    if (saveTimeoutRef.current) clearTimeout(saveTimeoutRef.current);
 
-    // Set new timeout to save after 600ms of inactivity
     saveTimeoutRef.current = setTimeout(async () => {
       try {
         if (activeNote.type === "track") {
           await updateTrackNotes(track.id, val || null);
+          captureVersionSnapshot(track.id, val, "General Notes");
         } else if (activeNote.type === "custom") {
           await updateNoteContent(activeNote.id, val);
+          // Label: search unfiled then folders
+          const unfiledNote = track.notesList?.find(n => n.id === activeNote.id);
+          let noteLabel = unfiledNote?.title;
+          if (!noteLabel) {
+            for (const f of (track.noteFolders || [])) {
+              const n = f.notes.find(n => n.id === activeNote.id);
+              if (n) { noteLabel = `${f.title} / ${n.title}`; break; }
+            }
+          }
+          captureVersionSnapshot(activeNote.id, val, noteLabel || "Document");
         } else {
           await updateTaskNotes(activeNote.id, val || null);
+          let taskLabel = "Task Notes";
+          for (const p of track.phases) {
+            const t = p.tasks.find(t => t.id === activeNote.id);
+            if (t) { taskLabel = t.content; break; }
+          }
+          captureVersionSnapshot(activeNote.id, val, taskLabel);
         }
         setSaveStatus("saved");
       } catch (err) {
@@ -346,6 +411,19 @@ export function TrackWorkspace({ initialTrack }: { initialTrack: any }) {
         setSaveStatus("error");
       }
     }, 600);
+  };
+
+  // Capture a version snapshot when note is saved
+  const captureVersionSnapshot = (noteKey: string, content: string, label: string) => {
+    if (!content.trim()) return;
+    setVersionHistory((prev) => {
+      const existing = prev[noteKey] || [];
+      // Don't duplicate identical consecutive snapshots
+      if (existing.length > 0 && existing[existing.length - 1].content === content) return prev;
+      const newSnapshots = [...existing, { timestamp: new Date(), content, label }];
+      // Keep max 30 snapshots per note
+      return { ...prev, [noteKey]: newSnapshots.slice(-30) };
+    });
   };
 
   // Cleanup on unmount
@@ -356,6 +434,30 @@ export function TrackWorkspace({ initialTrack }: { initialTrack: any }) {
       }
     };
   }, []);
+
+  // Global keyboard listener for Command Palette (Ctrl/Cmd+P)
+  useEffect(() => {
+    const handleGlobalKey = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "p") {
+        e.preventDefault();
+        setShowCommandPalette((prev) => !prev);
+        setCommandQuery("");
+      }
+      if (e.key === "Escape") {
+        setShowCommandPalette(false);
+        setShowHistoryModal(false);
+      }
+    };
+    window.addEventListener("keydown", handleGlobalKey);
+    return () => window.removeEventListener("keydown", handleGlobalKey);
+  }, []);
+
+  // Focus command input when palette opens
+  useEffect(() => {
+    if (showCommandPalette) {
+      setTimeout(() => commandInputRef.current?.focus(), 50);
+    }
+  }, [showCommandPalette]);
 
   // 4. Action Handlers (all with instant optimistic updates)
 
@@ -380,14 +482,15 @@ export function TrackWorkspace({ initialTrack }: { initialTrack: any }) {
     });
   };
 
-  // Add Task under a Phase
-  const handleAddTask = async (phaseId: string, content: string) => {
+  // Add Task directly under the track (phase is transparent)
+  const handleAddTask = async (content: string) => {
     if (!content.trim()) return;
     const tempId = `temp-${Date.now()}`;
-    
+    const defaultPhaseId = track.phases[0]?.id ?? "temp-phase";
+
     const newTaskObj: ClientTask = {
       id: tempId,
-      phaseId,
+      phaseId: defaultPhaseId,
       content: content.trim(),
       notes: "",
       completed: false,
@@ -395,36 +498,23 @@ export function TrackWorkspace({ initialTrack }: { initialTrack: any }) {
       order: 999
     };
 
-    // Update local state instantly
     setTrack((prev) => ({
       ...prev,
-      phases: prev.phases.map((p) => {
-        if (p.id === phaseId) {
-          return { ...p, tasks: [...p.tasks, newTaskObj] };
-        }
-        return p;
-      })
+      phases: prev.phases.length > 0
+        ? prev.phases.map((p, i) => i === 0 ? { ...p, tasks: [...p.tasks, newTaskObj] } : p)
+        : [{ id: defaultPhaseId, trackId: prev.id, index: 0, title: "Tasks", concept: null, tasks: [newTaskObj] }]
     }));
 
-    // Server update
     try {
-      const createdTask = await addTask(phaseId, content);
+      const createdTask = await addTask(track.id, content);
       if (createdTask) {
-        // Swap temp ID with actual db ID
         setTrack((prev) => ({
           ...prev,
-          phases: prev.phases.map((p) => {
-            if (p.id === phaseId) {
-              return {
-                ...p,
-                tasks: p.tasks.map((t) => (t.id === tempId ? { ...t, id: createdTask.id } : t))
-              };
-            }
-            return p;
-          })
+          phases: prev.phases.map((p) => ({
+            ...p,
+            tasks: p.tasks.map((t) => (t.id === tempId ? { ...t, id: createdTask.id, phaseId: createdTask.phaseId } : t))
+          }))
         }));
-        
-        // If the user selected the temp task, switch selection to real ID
         setActiveNote((curr) => (curr.id === tempId ? { ...curr, id: createdTask.id } : curr));
       }
     } catch (err) {
@@ -473,90 +563,10 @@ export function TrackWorkspace({ initialTrack }: { initialTrack: any }) {
     });
   };
 
-  // Add Phase
-  const handleAddPhase = async () => {
-    if (!newPhaseTitle.trim()) return;
-    const tempId = `temp-phase-${Date.now()}`;
-    const nextIndex = track.phases.length;
-
-    const newPhaseObj: ClientPhase = {
-      id: tempId,
-      trackId: track.id,
-      index: nextIndex,
-      title: newPhaseTitle.trim(),
-      concept: newPhaseConcept.trim() || null,
-      tasks: []
-    };
-
-    // Update local state instantly
-    setTrack((prev) => ({
-      ...prev,
-      phases: [...prev.phases, newPhaseObj]
-    }));
-
-    setIsAddingPhase(false);
-    setNewPhaseTitle("");
-    setNewPhaseConcept("");
-
-    // Server update
-    try {
-      const createdPhase = await addPhase(track.id, newPhaseObj.title, newPhaseObj.concept || undefined);
-      if (createdPhase) {
-        // Swap temp ID with db ID
-        setTrack((prev) => ({
-          ...prev,
-          phases: prev.phases.map((p) => (p.id === tempId ? { ...p, id: createdPhase.id } : p))
-        }));
-      }
-    } catch (err) {
-      console.error(err);
-    }
-  };
-
-  // Edit Phase Info
-  const handleEditPhase = async () => {
-    if (!editingPhaseId || !phaseModalTitle.trim()) return;
-
-    // Update local state instantly
-    setTrack((prev) => ({
-      ...prev,
-      phases: prev.phases.map((p) =>
-        p.id === editingPhaseId
-          ? { ...p, title: phaseModalTitle.trim(), concept: phaseModalConcept.trim() || null }
-          : p
-      )
-    }));
-
-    const targetId = editingPhaseId;
-    const targetTitle = phaseModalTitle;
-    const targetConcept = phaseModalConcept;
-
-    setEditingPhaseId(null);
-
-    // Server update
+  // Pin/unpin this track
+  const handleTogglePin = () => {
     startTransition(async () => {
-      await updatePhase(targetId, targetTitle, targetConcept);
-    });
-  };
-
-  // Delete Phase
-  const handleDeletePhase = (phaseId: string) => {
-    // Find if active note is in the phase
-    const targetPhase = track.phases.find((p) => p.id === phaseId);
-    const containsActive = targetPhase?.tasks.some((t) => t.id === activeNote.id);
-    if (containsActive) {
-      setActiveNote({ type: "track", id: track.id });
-    }
-
-    // Update local state instantly
-    setTrack((prev) => ({
-      ...prev,
-      phases: prev.phases.filter((p) => p.id !== phaseId)
-    }));
-
-    // Server update
-    startTransition(async () => {
-      await deletePhase(phaseId);
+      await togglePin(track.id, !(track as any).pinned);
     });
   };
 
@@ -591,31 +601,55 @@ export function TrackWorkspace({ initialTrack }: { initialTrack: any }) {
   };
 
   // Note handlers
-  const handleAddNote = async () => {
+  const handleAddNote = async (folderId: string | null = null) => {
     if (!newNoteTitle.trim()) return;
     const tempId = `temp-note-${Date.now()}`;
     const newNoteObj: ClientNote = {
       id: tempId,
       trackId: track.id,
+      folderId,
       title: newNoteTitle.trim(),
       content: "",
+      order: 999,
       createdAt: new Date(),
-      updatedAt: new Date()
+      updatedAt: new Date(),
     };
-    setTrack((prev) => ({
-      ...prev,
-      notesList: [...(prev.notesList || []), newNoteObj]
-    }));
+
+    if (folderId) {
+      // Add inside a folder
+      setTrack((prev) => ({
+        ...prev,
+        noteFolders: (prev.noteFolders || []).map((f) =>
+          f.id === folderId ? { ...f, notes: [...f.notes, newNoteObj] } : f
+        ),
+      }));
+    } else {
+      // Add as unfiled
+      setTrack((prev) => ({ ...prev, notesList: [...(prev.notesList || []), newNoteObj] }));
+    }
+
     setIsAddingNote(false);
+    setAddingNoteToFolderId(null);
     setNewNoteTitle("");
 
     try {
-      const createdNote = await addNote(track.id, newNoteObj.title);
+      const createdNote = await addNote(track.id, newNoteObj.title, folderId);
       if (createdNote) {
-        setTrack((prev) => ({
-          ...prev,
-          notesList: (prev.notesList || []).map((n) => (n.id === tempId ? { ...n, id: createdNote.id } : n))
-        }));
+        if (folderId) {
+          setTrack((prev) => ({
+            ...prev,
+            noteFolders: (prev.noteFolders || []).map((f) =>
+              f.id === folderId
+                ? { ...f, notes: f.notes.map((n) => (n.id === tempId ? { ...n, id: createdNote.id } : n)) }
+                : f
+            ),
+          }));
+        } else {
+          setTrack((prev) => ({
+            ...prev,
+            notesList: (prev.notesList || []).map((n) => (n.id === tempId ? { ...n, id: createdNote.id } : n)),
+          }));
+        }
         setActiveNote({ type: "custom", id: createdNote.id });
       }
     } catch (err) {
@@ -623,29 +657,113 @@ export function TrackWorkspace({ initialTrack }: { initialTrack: any }) {
     }
   };
 
-  const handleDeleteNote = (noteId: string) => {
+  const handleDeleteNote = (noteId: string, folderId: string | null = null) => {
     if (activeNote.type === "custom" && activeNote.id === noteId) {
       setActiveNote({ type: "track", id: track.id });
     }
+    if (folderId) {
+      setTrack((prev) => ({
+        ...prev,
+        noteFolders: (prev.noteFolders || []).map((f) =>
+          f.id === folderId ? { ...f, notes: f.notes.filter((n) => n.id !== noteId) } : f
+        ),
+      }));
+    } else {
+      setTrack((prev) => ({ ...prev, notesList: (prev.notesList || []).filter((n) => n.id !== noteId) }));
+    }
+    startTransition(async () => { await deleteNote(noteId); });
+  };
+
+  const handleRenameNote = (noteId: string, newTitle: string, folderId: string | null = null) => {
+    if (!newTitle.trim()) return;
+    const updater = (notes: ClientNote[]) =>
+      notes.map((n) => (n.id === noteId ? { ...n, title: newTitle.trim() } : n));
+    if (folderId) {
+      setTrack((prev) => ({
+        ...prev,
+        noteFolders: (prev.noteFolders || []).map((f) =>
+          f.id === folderId ? { ...f, notes: updater(f.notes) } : f
+        ),
+      }));
+    } else {
+      setTrack((prev) => ({ ...prev, notesList: updater(prev.notesList || []) }));
+    }
+    startTransition(async () => { await updateNoteTitle(noteId, newTitle); });
+  };
+
+  // ── Folder handlers ─────────────────────────────────────────────────────────
+
+  const handleCreateFolder = async () => {
+    if (!newFolderTitle.trim()) return;
+    const tempId = `temp-folder-${Date.now()}`;
+    const newFolder: ClientNoteFolder = {
+      id: tempId,
+      trackId: track.id,
+      title: newFolderTitle.trim(),
+      order: (track.noteFolders?.length ?? 0),
+      notes: [],
+    };
+    setTrack((prev) => ({ ...prev, noteFolders: [...(prev.noteFolders || []), newFolder] }));
+    setExpandedFolders((prev) => new Set([...prev, tempId]));
+    setIsAddingFolder(false);
+    setNewFolderTitle("");
+    try {
+      const created = await createNoteFolder(track.id, newFolder.title);
+      if (created) {
+        setTrack((prev) => ({
+          ...prev,
+          noteFolders: (prev.noteFolders || []).map((f) => (f.id === tempId ? { ...f, id: created.id } : f)),
+        }));
+        setExpandedFolders((prev) => {
+          const next = new Set(prev);
+          next.delete(tempId);
+          next.add(created.id);
+          return next;
+        });
+      }
+    } catch (err) { console.error(err); }
+  };
+
+  const handleDeleteFolder = (folderId: string) => {
+    if (!confirm("Delete this folder? Notes inside will become unfiled.")) return;
+    const folder = track.noteFolders?.find((f) => f.id === folderId);
+    const unfiledNotes = folder?.notes ?? [];
     setTrack((prev) => ({
       ...prev,
-      notesList: (prev.notesList || []).filter((n) => n.id !== noteId)
+      noteFolders: (prev.noteFolders || []).filter((f) => f.id !== folderId),
+      notesList: [
+        ...(prev.notesList || []),
+        ...unfiledNotes.map((n) => ({ ...n, folderId: null })),
+      ],
     }));
-    startTransition(async () => {
-      await deleteNote(noteId);
+    if (activeNote.type === "custom" && unfiledNotes.some((n) => n.id === activeNote.id)) {
+      // note is now unfiled — still accessible
+    }
+    startTransition(async () => { await deleteNoteFolder(folderId); });
+  };
+
+  const handleRenameFolder = async (folderId: string) => {
+    if (!renameFolderTitle.trim()) { setRenamingFolderId(null); return; }
+    setTrack((prev) => ({
+      ...prev,
+      noteFolders: (prev.noteFolders || []).map((f) =>
+        f.id === folderId ? { ...f, title: renameFolderTitle.trim() } : f
+      ),
+    }));
+    setRenamingFolderId(null);
+    startTransition(async () => { await updateNoteFolder(folderId, renameFolderTitle); });
+  };
+
+  const toggleFolderExpanded = (folderId: string) => {
+    setExpandedFolders((prev) => {
+      const next = new Set(prev);
+      if (next.has(folderId)) next.delete(folderId);
+      else next.add(folderId);
+      return next;
     });
   };
 
-  const handleRenameNote = (noteId: string, newTitle: string) => {
-    if (!newTitle.trim()) return;
-    setTrack((prev) => ({
-      ...prev,
-      notesList: (prev.notesList || []).map((n) => (n.id === noteId ? { ...n, title: newTitle.trim() } : n))
-    }));
-    startTransition(async () => {
-      await updateNoteTitle(noteId, newTitle);
-    });
-  };
+
 
   // Export & Extractor functions
   const [extractedTasks, setExtractedTasks] = useState<string[]>([]);
@@ -676,11 +794,8 @@ export function TrackWorkspace({ initialTrack }: { initialTrack: any }) {
     const lines = editorText.split("\n");
     const tasksFound: string[] = [];
     for (const line of lines) {
-      // Look for lines starting with checklists: - [ ] content
       const checkMatch = line.match(/^(\s*[-*+]\s\[[ ]\])\s*(.*)/);
-      // Or general list items: - content or * content (ignore if it's check list item like - [x] or - [ ])
       const listMatch = line.match(/^(\s*[-*+])\s*(?!\[[ xX]\])(.*)/);
-      // Or ordered lists: 1. content
       const numMatch = line.match(/^(\s*\d+\.)\s*(.*)/);
 
       if (checkMatch && checkMatch[2].trim()) {
@@ -693,39 +808,27 @@ export function TrackWorkspace({ initialTrack }: { initialTrack: any }) {
     }
 
     if (tasksFound.length === 0) {
-      alert("No checklist or list items found in the current note content. Try adding some items like '- [ ] Task 1' or '- Task 2'.");
+      alert("No checklist or list items found. Try '- [ ] Task 1' or '- Task 2'.");
       return;
     }
 
     setExtractedTasks(tasksFound);
     const initialSelection: Record<number, boolean> = {};
-    tasksFound.forEach((_, idx) => {
-      initialSelection[idx] = true;
-    });
+    tasksFound.forEach((_, idx) => { initialSelection[idx] = true; });
     setSelectedExtractedTasks(initialSelection);
-    if (track.phases.length > 0) {
-      setExtractorTargetPhaseId(track.phases[0].id);
-    }
+    // extractorTargetPhaseId is unused now — handleImportExtractedTasks uses track.id
     setShowExtractorModal(true);
   };
 
   const handleImportExtractedTasks = async () => {
-    if (!extractorTargetPhaseId) {
-      alert("Please add/select a Phase to import tasks into.");
-      return;
-    }
-
     const tasksToImport = extractedTasks.filter((_, idx) => selectedExtractedTasks[idx]);
     if (tasksToImport.length === 0) {
       alert("No tasks selected.");
       return;
     }
-
-    // Add tasks
     for (const taskContent of tasksToImport) {
-      await handleAddTask(extractorTargetPhaseId, taskContent);
+      await handleAddTask(taskContent);
     }
-
     setShowExtractorModal(false);
   };
 
@@ -855,8 +958,15 @@ export function TrackWorkspace({ initialTrack }: { initialTrack: any }) {
     ? "General Notes"
     : activeNote.type === "custom"
     ? (() => {
-        const n = (track.notesList || []).find((x) => x.id === activeNote.id);
-        return n ? n.title : "Notes";
+        // Search unfiled notes first
+        const unfiled = (track.notesList || []).find((x) => x.id === activeNote.id);
+        if (unfiled) return unfiled.title;
+        // Search in folders
+        for (const folder of (track.noteFolders || [])) {
+          const n = folder.notes.find((x) => x.id === activeNote.id);
+          if (n) return n.title;
+        }
+        return "Notes";
       })()
     : (() => {
         for (const phase of track.phases) {
@@ -867,16 +977,9 @@ export function TrackWorkspace({ initialTrack }: { initialTrack: any }) {
       })();
 
   const activeNoteParent = activeNote.type === "task"
-    ? (() => {
-        for (const phase of track.phases) {
-          if (phase.tasks.some((t) => t.id === activeNote.id)) {
-            return `Phase ${phase.index}: ${phase.title}`;
-          }
-        }
-        return "";
-      })()
+    ? "Task Notes"
     : activeNote.type === "custom"
-    ? "Custom Documents"
+    ? "Documents & Logs"
     : "";
 
   // Statistics
@@ -1000,309 +1103,368 @@ export function TrackWorkspace({ initialTrack }: { initialTrack: any }) {
             </div>
           ) : null}
 
-          {/* Section: Custom Documents */}
+          {/* Section: Documents & Folders */}
           <div>
-            <div className="px-2 pb-1 flex items-center justify-between text-[10px] font-mono uppercase tracking-wider text-muted">
+            {/* Header row */}
+            <div className="px-2 pb-1.5 flex items-center justify-between text-[10px] font-mono uppercase tracking-wider text-muted">
               <span>Documents & Logs</span>
-              <button
-                onClick={() => setIsAddingNote(true)}
-                className="hover:text-zinc-200 transition-colors flex items-center gap-0.5 text-[9px] px-1 py-0.2 rounded border border-border bg-[#0a0a0c]"
-              >
-                <Plus className="h-2.5 w-2.5" />
-                Add
-              </button>
+              <div className="flex items-center gap-1">
+                {/* New Folder */}
+                <button
+                  onClick={() => { setIsAddingFolder(true); setIsAddingNote(false); }}
+                  className="hover:text-zinc-200 transition-colors flex items-center gap-0.5 text-[9px] px-1.5 py-0.5 rounded border border-border bg-[#0a0a0c]"
+                  title="New folder"
+                >
+                  <FolderPlus className="h-2.5 w-2.5" />
+                  Folder
+                </button>
+                {/* New unfiled note */}
+                <button
+                  onClick={() => { setIsAddingNote(true); setAddingNoteToFolderId(null); setIsAddingFolder(false); }}
+                  className="hover:text-zinc-200 transition-colors flex items-center gap-0.5 text-[9px] px-1.5 py-0.5 rounded border border-border bg-[#0a0a0c]"
+                  title="New document"
+                >
+                  <Plus className="h-2.5 w-2.5" />
+                  Note
+                </button>
+              </div>
             </div>
 
-            {isAddingNote && (
-              <div className="mt-1.5 p-2 rounded-lg border border-border bg-panel space-y-1.5">
+            {/* New Folder inline input */}
+            {isAddingFolder && (
+              <div className="mb-2 p-2 rounded-lg border border-border bg-panel space-y-1.5">
                 <input
                   type="text"
-                  placeholder="Document Title (e.g. Setup Spec)"
-                  value={newNoteTitle}
-                  onChange={(e) => setNewNoteTitle(e.target.value)}
+                  placeholder="Folder name (e.g. Promises & Async)"
+                  value={newFolderTitle}
+                  onChange={(e) => setNewFolderTitle(e.target.value)}
                   onKeyDown={(e) => {
-                    if (e.key === "Enter") handleAddNote();
-                    if (e.key === "Escape") setIsAddingNote(false);
+                    if (e.key === "Enter") handleCreateFolder();
+                    if (e.key === "Escape") { setIsAddingFolder(false); setNewFolderTitle(""); }
                   }}
                   className="w-full px-2 py-1 rounded bg-base text-xs border border-border focus:border-zinc-500 focus:outline-none"
                   autoFocus
                 />
                 <div className="flex justify-end gap-1 text-[9px]">
-                  <button
-                    onClick={() => setIsAddingNote(false)}
-                    className="px-2 py-0.5 text-muted hover:text-zinc-200"
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    onClick={handleAddNote}
-                    disabled={!newNoteTitle.trim()}
-                    className="px-2 py-0.5 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white rounded font-medium"
-                  >
-                    Create
-                  </button>
+                  <button onClick={() => { setIsAddingFolder(false); setNewFolderTitle(""); }} className="px-2 py-0.5 text-muted hover:text-zinc-200">Cancel</button>
+                  <button onClick={handleCreateFolder} disabled={!newFolderTitle.trim()} className="px-2 py-0.5 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white rounded font-medium">Create</button>
                 </div>
               </div>
             )}
 
-            <div className="space-y-1 mt-1.5">
-              {(track.notesList || []).map((note) => {
-                const noteMatches =
-                  matchesSearch(note.title) ||
-                  matchesSearch(note.content);
-
-                if (hasSearchMatches && !noteMatches) return null;
-
-                const isSelected = activeNote.type === "custom" && activeNote.id === note.id;
-
-                return (
-                  <div
-                    key={note.id}
-                    className={cn(
-                      "flex items-center justify-between group/note pl-2 pr-1 py-1.5 rounded-md text-xs transition-all",
-                      isSelected
-                        ? "bg-panel border border-border text-zinc-100 font-medium"
-                        : "text-muted hover:bg-panel/30 hover:text-zinc-200 border border-transparent"
-                    )}
-                  >
-                    <button
-                      onClick={() => handleSelectNote("custom", note.id)}
-                      className="truncate text-left flex-1 py-0.5 flex items-center gap-2 min-w-0"
-                    >
-                      <NotebookPen className={cn("h-3.5 w-3.5 shrink-0", isSelected ? theme.text : "text-muted")} />
-                      <span className="truncate block flex-1">{note.title}</span>
-                      {hasSearchMatches && getSearchSnippet(note.content, searchQuery) && (
-                        <span className="block text-[10px] text-amber-400/80 font-mono mt-0.5 truncate font-normal">
-                          matched: "{getSearchSnippet(note.content, searchQuery)}"
-                        </span>
-                      )}
-                    </button>
-
-                    <div className="opacity-0 group-hover/note:opacity-100 flex items-center transition-opacity shrink-0">
-                      <button
-                        onClick={() => {
-                          const nextName = prompt("Rename Document:", note.title);
-                          if (nextName) handleRenameNote(note.id, nextName);
-                        }}
-                        className="p-1 text-muted hover:text-zinc-200 rounded"
-                        title="Rename Document"
-                      >
-                        <Edit3 className="h-3 w-3" />
-                      </button>
-                      <button
-                        onClick={() => {
-                          if (confirm(`Are you sure you want to permanently delete "${note.title}"?`)) {
-                            handleDeleteNote(note.id);
-                          }
-                        }}
-                        className="p-1 text-muted hover:text-red-400 rounded"
-                        title="Delete Document"
-                      >
-                        <Trash2 className="h-3 w-3" />
-                      </button>
-                    </div>
-                  </div>
-                );
-              })}
-
-              {(!track.notesList || track.notesList.length === 0) && (
-                <div className="text-[10px] text-muted/60 italic text-center py-2 px-1">
-                  No custom documents.
+            {/* Unfiled note inline input */}
+            {isAddingNote && addingNoteToFolderId === null && (
+              <div className="mb-2 p-2 rounded-lg border border-border bg-panel space-y-1.5">
+                <input
+                  type="text"
+                  placeholder="Document title..."
+                  value={newNoteTitle}
+                  onChange={(e) => setNewNoteTitle(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") handleAddNote(null);
+                    if (e.key === "Escape") { setIsAddingNote(false); setNewNoteTitle(""); }
+                  }}
+                  className="w-full px-2 py-1 rounded bg-base text-xs border border-border focus:border-zinc-500 focus:outline-none"
+                  autoFocus
+                />
+                <div className="flex justify-end gap-1 text-[9px]">
+                  <button onClick={() => { setIsAddingNote(false); setNewNoteTitle(""); }} className="px-2 py-0.5 text-muted hover:text-zinc-200">Cancel</button>
+                  <button onClick={() => handleAddNote(null)} disabled={!newNoteTitle.trim()} className="px-2 py-0.5 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white rounded font-medium">Create</button>
                 </div>
-              )}
-            </div>
-          </div>
+              </div>
+            )}
 
-          {/* Section: Phases & Checklist */}
-          <div>
-            <div className="px-2 pb-1 flex items-center justify-between text-[10px] font-mono uppercase tracking-wider text-muted">
-              <span>Gauntlet Map</span>
-              <span>{notesCount} note{notesCount === 1 ? "" : "s"}</span>
-            </div>
-
-            <div className="space-y-3 mt-1.5">
-              {track.phases.map((phase) => {
-                const phaseMatches =
-                  matchesSearch(phase.title) ||
-                  (phase.concept && matchesSearch(phase.concept)) ||
-                  phase.tasks.some((t) => matchesSearch(t.content) || (t.notes && matchesSearch(t.notes)));
-
-                if (hasSearchMatches && !phaseMatches) return null;
-
-                const allPhaseCompleted = phase.tasks.length > 0 && phase.tasks.every(t => t.completed);
+            <div className="space-y-1">
+              {/* ── Folders ─────────────────────────────────────────────── */}
+              {(track.noteFolders || []).map((folder) => {
+                const isExpanded = expandedFolders.has(folder.id);
+                const isRenaming = renamingFolderId === folder.id;
+                const folderMatches =
+                  matchesSearch(folder.title) ||
+                  folder.notes.some((n) => matchesSearch(n.title) || matchesSearch(n.content));
+                if (hasSearchMatches && !folderMatches) return null;
 
                 return (
-                  <div key={phase.id} className="rounded-lg border border-border/40 bg-panel/20 p-1.5">
-                    {/* Phase Header */}
-                    <div className="flex items-start justify-between px-1.5 py-1 group">
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-1.5">
-                          <span className={cn("font-mono text-xs font-semibold", allPhaseCompleted ? "text-emerald-400" : "text-muted")}>
-                            P{phase.index}
-                          </span>
-                          <span className="font-semibold text-xs text-zinc-200 truncate">{phase.title}</span>
-                        </div>
-                        {phase.concept && (
-                          <p className="text-[10px] text-muted truncate mt-0.5">{phase.concept}</p>
+                  <div key={folder.id}>
+                    {/* Folder row */}
+                    <div className="flex items-center group/folder px-1 py-1 rounded-md hover:bg-panel/40 transition-all">
+                      {/* Expand toggle */}
+                      <button
+                        onClick={() => toggleFolderExpanded(folder.id)}
+                        className="shrink-0 p-0.5 text-muted hover:text-zinc-200"
+                      >
+                        <ChevronRight className={cn("h-3 w-3 transition-transform", isExpanded && "rotate-90")} />
+                      </button>
+
+                      {/* Folder icon & name */}
+                      <button
+                        onClick={() => toggleFolderExpanded(folder.id)}
+                        className="flex items-center gap-1.5 flex-1 min-w-0 text-left"
+                      >
+                        {isExpanded
+                          ? <FolderOpen className="h-3.5 w-3.5 shrink-0 text-amber-400/80" />
+                          : <Folder className="h-3.5 w-3.5 shrink-0 text-amber-400/60" />
+                        }
+                        {isRenaming ? (
+                          <input
+                            type="text"
+                            value={renameFolderTitle}
+                            onChange={(e) => setRenameFolderTitle(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter") handleRenameFolder(folder.id);
+                              if (e.key === "Escape") setRenamingFolderId(null);
+                            }}
+                            onBlur={() => handleRenameFolder(folder.id)}
+                            className="flex-1 bg-panel border border-border rounded px-1 text-xs text-zinc-200 focus:outline-none focus:border-zinc-500"
+                            autoFocus
+                            onClick={(e) => e.stopPropagation()}
+                          />
+                        ) : (
+                          <span className="text-xs font-medium text-zinc-300 truncate">{folder.title}</span>
                         )}
-                      </div>
-                      
-                      {/* Phase Actions */}
-                      <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
+                      </button>
+
+                      {/* Note count badge */}
+                      <span className="text-[9px] font-mono text-muted/60 shrink-0 mr-1">
+                        {folder.notes.length}
+                      </span>
+
+                      {/* Folder actions */}
+                      <div className="opacity-0 group-hover/folder:opacity-100 flex items-center gap-0.5 transition-opacity shrink-0">
+                        {/* Add note inside folder */}
                         <button
                           onClick={() => {
-                            setEditingPhaseId(phase.id);
-                            setPhaseModalTitle(phase.title);
-                            setPhaseModalConcept(phase.concept || "");
+                            setAddingNoteToFolderId(folder.id);
+                            setIsAddingNote(true);
+                            setIsAddingFolder(false);
+                            if (!isExpanded) toggleFolderExpanded(folder.id);
                           }}
-                          className="p-1 text-muted hover:text-zinc-100 rounded hover:bg-panel"
+                          className="p-0.5 text-muted hover:text-zinc-200 rounded"
+                          title="Add note to folder"
+                        >
+                          <Plus className="h-3 w-3" />
+                        </button>
+                        <button
+                          onClick={() => { setRenamingFolderId(folder.id); setRenameFolderTitle(folder.title); }}
+                          className="p-0.5 text-muted hover:text-zinc-200 rounded"
+                          title="Rename folder"
                         >
                           <Edit3 className="h-3 w-3" />
                         </button>
                         <button
-                          onClick={() => {
-                            if (confirm(`Delete Phase P${phase.index}: "${phase.title}" and all its tasks?`)) {
-                              handleDeletePhase(phase.id);
-                            }
-                          }}
-                          className="p-1 text-muted hover:text-red-400 rounded hover:bg-panel"
+                          onClick={() => handleDeleteFolder(folder.id)}
+                          className="p-0.5 text-muted hover:text-red-400 rounded"
+                          title="Delete folder"
                         >
                           <Trash2 className="h-3 w-3" />
                         </button>
                       </div>
                     </div>
 
-                    {/* Tasks Checklist */}
-                    <div className="mt-1 space-y-0.5">
-                      {phase.tasks.map((task) => {
-                        const taskMatches =
-                          matchesSearch(task.content) ||
-                          (task.notes && matchesSearch(task.notes));
+                    {/* Inline add note inside folder */}
+                    {isAddingNote && addingNoteToFolderId === folder.id && (
+                      <div className="ml-5 mr-1 mb-1 p-2 rounded-lg border border-border bg-panel space-y-1.5">
+                        <input
+                          type="text"
+                          placeholder="Note title..."
+                          value={newNoteTitle}
+                          onChange={(e) => setNewNoteTitle(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") handleAddNote(folder.id);
+                            if (e.key === "Escape") { setIsAddingNote(false); setNewNoteTitle(""); }
+                          }}
+                          className="w-full px-2 py-1 rounded bg-base text-xs border border-border focus:border-zinc-500 focus:outline-none"
+                          autoFocus
+                        />
+                        <div className="flex justify-end gap-1 text-[9px]">
+                          <button onClick={() => { setIsAddingNote(false); setNewNoteTitle(""); }} className="px-2 py-0.5 text-muted hover:text-zinc-200">Cancel</button>
+                          <button onClick={() => handleAddNote(folder.id)} disabled={!newNoteTitle.trim()} className="px-2 py-0.5 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white rounded font-medium">Add</button>
+                        </div>
+                      </div>
+                    )}
 
-                        if (hasSearchMatches && !taskMatches) return null;
-
-                        const isSelected = activeNote.type === "task" && activeNote.id === task.id;
-
-                        return (
-                          <div
-                            key={task.id}
-                            className={cn(
-                              "flex items-center justify-between group/task pl-2 pr-1 py-1 rounded-md text-xs transition-all",
+                    {/* Notes inside folder */}
+                    {isExpanded && (
+                      <div className="ml-5 space-y-0.5 mt-0.5">
+                        {folder.notes.length === 0 && !(isAddingNote && addingNoteToFolderId === folder.id) && (
+                          <div className="text-[10px] text-muted/50 italic px-2 py-1">Empty folder</div>
+                        )}
+                        {folder.notes.map((note) => {
+                          const noteMatches = matchesSearch(note.title) || matchesSearch(note.content);
+                          if (hasSearchMatches && !noteMatches) return null;
+                          const isSelected = activeNote.type === "custom" && activeNote.id === note.id;
+                          return (
+                            <div key={note.id} className={cn(
+                              "flex items-center justify-between group/note pl-2 pr-1 py-1 rounded-md text-xs transition-all",
                               isSelected
                                 ? "bg-panel border border-border text-zinc-100 font-medium"
                                 : "text-muted hover:bg-panel/30 hover:text-zinc-200 border border-transparent"
-                            )}
-                          >
-                            <div className="flex items-center gap-2 min-w-0 flex-1">
+                            )}>
                               <button
-                                onClick={() => handleToggleTask(task.id, task.completed)}
-                                className="focus:outline-none shrink-0"
+                                onClick={() => handleSelectNote("custom", note.id)}
+                                className="truncate text-left flex-1 py-0.5 flex items-center gap-2 min-w-0"
                               >
-                                {task.completed ? (
-                                  <CheckCircle2 className="h-3.5 w-3.5 text-emerald-500 fill-emerald-500/10" />
-                                ) : (
-                                  <Circle className="h-3.5 w-3.5 text-zinc-600 hover:text-zinc-400" />
-                                )}
+                                <FileText className={cn("h-3 w-3 shrink-0", isSelected ? theme.text : "text-muted/60")} />
+                                <span className="truncate">{note.title}</span>
                               </button>
-                              
-                              <button
-                                onClick={() => handleSelectNote("task", task.id)}
-                                className={cn(
-                                  "truncate text-left flex-1 py-0.5",
-                                  task.completed && "line-through text-muted/60"
-                                )}
-                              >
-                                <span className="block truncate">{task.content}</span>
-                                {hasSearchMatches && getSearchSnippet(task.notes, searchQuery) && (
-                                  <span className="block text-[10px] text-amber-400/80 font-mono mt-0.5 truncate font-normal">
-                                    matched: "{getSearchSnippet(task.notes, searchQuery)}"
-                                  </span>
-                                )}
-                              </button>
-                            </div>
-
-                            <div className="flex items-center gap-1">
-                              {task.notes && (
-                                <span className={cn("text-[9px] px-1 py-0.2 rounded font-mono border", theme.text, theme.border)}>
-                                  Note
-                                </span>
-                              )}
-                              <div className="opacity-0 group-hover/task:opacity-100 flex items-center transition-opacity">
+                              <div className="opacity-0 group-hover/note:opacity-100 flex items-center gap-0.5 transition-opacity shrink-0">
                                 <button
-                                  onClick={() => {
-                                    const nextName = prompt("Rename Task:", task.content);
-                                    if (nextName) handleEditTaskContent(task.id, nextName);
-                                  }}
-                                  className="p-1 text-muted hover:text-zinc-200 rounded"
-                                >
-                                  <Edit3 className="h-2.5 w-2.5" />
-                                </button>
+                                  onClick={() => { const t = prompt("Rename:", note.title); if (t) handleRenameNote(note.id, t, folder.id); }}
+                                  className="p-0.5 text-muted hover:text-zinc-200 rounded"
+                                ><Edit3 className="h-2.5 w-2.5" /></button>
                                 <button
-                                  onClick={() => handleDeleteTask(task.id)}
-                                  className="p-1 text-muted hover:text-red-400 rounded"
-                                >
-                                  <Trash2 className="h-2.5 w-2.5" />
-                                </button>
+                                  onClick={() => { if (confirm(`Delete "${note.title}"?`)) handleDeleteNote(note.id, folder.id); }}
+                                  className="p-0.5 text-muted hover:text-red-400 rounded"
+                                ><Trash2 className="h-2.5 w-2.5" /></button>
                               </div>
                             </div>
-                          </div>
-                        );
-                      })}
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
 
-                      {/* Add Task Input inside Phase */}
-                      <AddTaskInline onAdd={(content) => handleAddTask(phase.id, content)} />
+              {/* ── Unfiled Notes ─────────────────────────────────────── */}
+              {(track.notesList || []).map((note) => {
+                const noteMatches = matchesSearch(note.title) || matchesSearch(note.content);
+                if (hasSearchMatches && !noteMatches) return null;
+                const isSelected = activeNote.type === "custom" && activeNote.id === note.id;
+                return (
+                  <div key={note.id} className={cn(
+                    "flex items-center justify-between group/note pl-2 pr-1 py-1.5 rounded-md text-xs transition-all",
+                    isSelected
+                      ? "bg-panel border border-border text-zinc-100 font-medium"
+                      : "text-muted hover:bg-panel/30 hover:text-zinc-200 border border-transparent"
+                  )}>
+                    <button
+                      onClick={() => handleSelectNote("custom", note.id)}
+                      className="truncate text-left flex-1 py-0.5 flex items-center gap-2 min-w-0"
+                    >
+                      <NotebookPen className={cn("h-3.5 w-3.5 shrink-0", isSelected ? theme.text : "text-muted")} />
+                      <span className="truncate block flex-1">{note.title}</span>
+                    </button>
+                    <div className="opacity-0 group-hover/note:opacity-100 flex items-center transition-opacity shrink-0">
+                      <button
+                        onClick={() => { const t = prompt("Rename:", note.title); if (t) handleRenameNote(note.id, t, null); }}
+                        className="p-1 text-muted hover:text-zinc-200 rounded"
+                      ><Edit3 className="h-3 w-3" /></button>
+                      <button
+                        onClick={() => { if (confirm(`Delete "${note.title}"?`)) handleDeleteNote(note.id, null); }}
+                        className="p-1 text-muted hover:text-red-400 rounded"
+                      ><Trash2 className="h-3 w-3" /></button>
                     </div>
                   </div>
                 );
               })}
+
+              {/* Empty state */}
+              {(track.noteFolders || []).length === 0 && (track.notesList || []).length === 0 && !isAddingNote && !isAddingFolder && (
+                <div className="text-[10px] text-muted/50 italic text-center py-3 px-2">
+                  No documents yet. Create a folder or add a note.
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Section: Tasks Checklist (flat — no phases exposed) */}
+          <div>
+            <div className="px-2 pb-1 flex items-center justify-between text-[10px] font-mono uppercase tracking-wider text-muted">
+              <span>Checklist</span>
+              <span>
+                {allTasks.filter(t => t.completed).length}/{allTasks.length} done
+              </span>
+            </div>
+
+            <div className="mt-1.5 space-y-0.5">
+              {allTasks.map((task) => {
+                const taskMatches =
+                  matchesSearch(task.content) ||
+                  (task.notes && matchesSearch(task.notes));
+
+                if (hasSearchMatches && !taskMatches) return null;
+
+                const isSelected = activeNote.type === "task" && activeNote.id === task.id;
+
+                return (
+                  <div
+                    key={task.id}
+                    className={cn(
+                      "flex items-center justify-between group/task pl-2 pr-1 py-1.5 rounded-md text-xs transition-all",
+                      isSelected
+                        ? "bg-panel border border-border text-zinc-100 font-medium"
+                        : "text-muted hover:bg-panel/30 hover:text-zinc-200 border border-transparent"
+                    )}
+                  >
+                    <div className="flex items-center gap-2 min-w-0 flex-1">
+                      <button
+                        onClick={() => handleToggleTask(task.id, task.completed)}
+                        className="focus:outline-none shrink-0"
+                      >
+                        {task.completed ? (
+                          <CheckCircle2 className="h-3.5 w-3.5 text-emerald-500 fill-emerald-500/10" />
+                        ) : (
+                          <Circle className="h-3.5 w-3.5 text-zinc-600 hover:text-zinc-400" />
+                        )}
+                      </button>
+
+                      <button
+                        onClick={() => handleSelectNote("task", task.id)}
+                        className={cn(
+                          "truncate text-left flex-1 py-0.5",
+                          task.completed && "line-through text-muted/60"
+                        )}
+                      >
+                        <span className="block truncate">{task.content}</span>
+                        {hasSearchMatches && getSearchSnippet(task.notes, searchQuery) && (
+                          <span className="block text-[10px] text-amber-400/80 font-mono mt-0.5 truncate font-normal">
+                            matched: &ldquo;{getSearchSnippet(task.notes, searchQuery)}&rdquo;
+                          </span>
+                        )}
+                      </button>
+                    </div>
+
+                    <div className="flex items-center gap-1">
+                      {task.notes && (
+                        <span className={cn("text-[9px] px-1 rounded font-mono border", theme.text, theme.border)}>
+                          Note
+                        </span>
+                      )}
+                      <div className="opacity-0 group-hover/task:opacity-100 flex items-center transition-opacity">
+                        <button
+                          onClick={() => {
+                            const nextName = prompt("Rename task:", task.content);
+                            if (nextName) handleEditTaskContent(task.id, nextName);
+                          }}
+                          className="p-1 text-muted hover:text-zinc-200 rounded"
+                        >
+                          <Edit3 className="h-2.5 w-2.5" />
+                        </button>
+                        <button
+                          onClick={() => handleDeleteTask(task.id)}
+                          className="p-1 text-muted hover:text-red-400 rounded"
+                        >
+                          <Trash2 className="h-2.5 w-2.5" />
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+
+              {allTasks.length === 0 && !hasSearchMatches && (
+                <div className="text-[10px] text-muted/50 italic text-center py-3 px-2">
+                  No tasks yet. Add one below.
+                </div>
+              )}
             </div>
           </div>
         </div>
 
-        {/* Sidebar Footer: Add Phase */}
+        {/* Sidebar Footer: Add Task */}
         <div className="p-3 border-t border-border bg-[#0a0a0c]/80">
-          {isAddingPhase ? (
-            <div className="space-y-2 p-2 rounded-lg border border-border bg-panel">
-              <input
-                type="text"
-                placeholder="Phase Title (e.g. Setup)"
-                value={newPhaseTitle}
-                onChange={(e) => setNewPhaseTitle(e.target.value)}
-                className="w-full px-2 py-1 rounded bg-base text-xs border border-border focus:border-zinc-500 focus:outline-none"
-                autoFocus
-              />
-              <input
-                type="text"
-                placeholder="Blurb/Concept (Optional)"
-                value={newPhaseConcept}
-                onChange={(e) => setNewPhaseConcept(e.target.value)}
-                className="w-full px-2 py-1 rounded bg-base text-xs border border-border focus:border-zinc-500 focus:outline-none"
-              />
-              <div className="flex justify-end gap-1 text-[10px]">
-                <button
-                  onClick={() => setIsAddingPhase(false)}
-                  className="px-2.5 py-1 text-muted hover:text-zinc-200"
-                >
-                  Cancel
-                </button>
-                <button
-                  onClick={handleAddPhase}
-                  disabled={!newPhaseTitle.trim()}
-                  className="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white rounded font-medium"
-                >
-                  Add Phase
-                </button>
-              </div>
-            </div>
-          ) : (
-            <button
-              onClick={() => setIsAddingPhase(true)}
-              className="w-full flex items-center justify-center gap-1.5 py-2 border border-dashed border-border hover:border-zinc-600 rounded-lg text-xs text-muted hover:text-zinc-200 transition-colors"
-            >
-              <PlusCircle className="h-3.5 w-3.5" />
-              Add New Phase
-            </button>
-          )}
+          <AddTaskInline onAdd={(content) => handleAddTask(content)} />
         </div>
       </aside>
 
@@ -1362,8 +1524,27 @@ export function TrackWorkspace({ initialTrack }: { initialTrack: any }) {
               )}
             </div>
 
-            {/* Task Extractor & Export */}
+            {/* Task Extractor, Export, History & Command Palette */}
             <div className="flex items-center gap-1.5">
+              {/* Command Palette button */}
+              <button
+                onClick={() => { setShowCommandPalette(true); setCommandQuery(""); }}
+                className="inline-flex items-center gap-1.5 px-2.5 py-1.5 bg-panel/60 hover:bg-panel border border-border text-muted hover:text-zinc-200 rounded-lg text-xs font-mono transition-all shadow-sm"
+                title="Command Palette (Ctrl+P)"
+              >
+                <Command className="h-3.5 w-3.5" />
+                <span className="hidden sm:inline text-[10px]">Ctrl+P</span>
+              </button>
+
+              {/* Version History button */}
+              <button
+                onClick={() => { setShowHistoryModal(true); setSelectedHistoryIdx(null); }}
+                className="p-2 border border-border rounded-lg bg-panel hover:bg-zinc-800 text-muted hover:text-zinc-200 transition-colors"
+                title="View note version history"
+              >
+                <FileClock className="h-4 w-4" />
+              </button>
+
               <button
                 onClick={handleOpenExtractor}
                 className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-emerald-950/40 hover:bg-emerald-900/60 border border-emerald-500/20 text-emerald-400 rounded-lg text-xs font-medium transition-all shadow-sm"
@@ -1539,53 +1720,6 @@ export function TrackWorkspace({ initialTrack }: { initialTrack: any }) {
         </div>
       </main>
 
-      {/* DIALOG: EDIT PHASE MODAL */}
-      {editingPhaseId && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
-          <div className="w-full max-w-md rounded-lg border border-border bg-panel p-6 shadow-2xl">
-            <h3 className="text-base font-bold text-zinc-100">Edit Phase Details</h3>
-            <p className="text-xs text-muted mt-1">Modify title and concept blurb for this phase.</p>
-            
-            <div className="mt-4 space-y-3">
-              <div>
-                <label className="text-[10px] font-mono uppercase tracking-wider text-muted block mb-1">Phase Title</label>
-                <input
-                  type="text"
-                  value={phaseModalTitle}
-                  onChange={(e) => setPhaseModalTitle(e.target.value)}
-                  className="w-full rounded-md border border-border bg-base px-3 py-2 text-sm text-zinc-200 focus:border-zinc-500 focus:outline-none"
-                />
-              </div>
-
-              <div>
-                <label className="text-[10px] font-mono uppercase tracking-wider text-muted block mb-1">Concept Blurb</label>
-                <input
-                  type="text"
-                  value={phaseModalConcept}
-                  onChange={(e) => setPhaseModalConcept(e.target.value)}
-                  className="w-full rounded-md border border-border bg-base px-3 py-2 text-sm text-zinc-200 focus:border-zinc-500 focus:outline-none"
-                />
-              </div>
-            </div>
-
-            <div className="mt-6 flex justify-end gap-2 text-xs">
-              <button
-                onClick={() => setEditingPhaseId(null)}
-                className="px-4 py-2 border border-border rounded-lg text-muted hover:text-zinc-200 transition-colors"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={handleEditPhase}
-                disabled={!phaseModalTitle.trim()}
-                className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white font-medium rounded-lg disabled:opacity-50 transition-colors"
-              >
-                Save Changes
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
 
       {/* DIALOG: TRACK SETTINGS MODAL */}
       {showSettings && (
@@ -1717,28 +1851,9 @@ export function TrackWorkspace({ initialTrack }: { initialTrack: any }) {
               })}
             </div>
 
-            {/* Target Phase Selector */}
-            <div className="mt-4">
-              <label className="text-[10px] font-mono uppercase tracking-wider text-muted block mb-1">
-                Target Gauntlet Phase
-              </label>
-              {track.phases.length > 0 ? (
-                <select
-                  value={extractorTargetPhaseId}
-                  onChange={(e) => setExtractorTargetPhaseId(e.target.value)}
-                  className="w-full rounded-md border border-border bg-base px-3 py-2 text-xs text-zinc-200 focus:border-zinc-500 focus:outline-none"
-                >
-                  {track.phases.map((phase) => (
-                    <option key={phase.id} value={phase.id}>
-                      Phase {phase.index}: {phase.title}
-                    </option>
-                  ))}
-                </select>
-              ) : (
-                <div className="text-xs text-amber-400 bg-amber-950/20 border border-amber-900/30 p-2 rounded">
-                  Please create a Phase in the sidebar first.
-                </div>
-              )}
+            {/* Tasks will be added directly to this gauntlet's checklist */}
+            <div className="mt-4 text-[11px] text-muted bg-panel/60 border border-border rounded-lg px-3 py-2">
+              Selected tasks will be added to this gauntlet&apos;s checklist.
             </div>
 
             <div className="mt-6 pt-4 border-t border-border flex justify-end gap-2 text-xs">
@@ -1750,7 +1865,7 @@ export function TrackWorkspace({ initialTrack }: { initialTrack: any }) {
               </button>
               <button
                 onClick={handleImportExtractedTasks}
-                disabled={!extractorTargetPhaseId || !Object.values(selectedExtractedTasks).some(Boolean)}
+                disabled={!Object.values(selectedExtractedTasks).some(Boolean)}
                 className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white font-medium rounded-lg disabled:opacity-50 transition-colors flex items-center gap-1.5"
               >
                 <Plus className="h-3.5 w-3.5" />
@@ -1760,50 +1875,216 @@ export function TrackWorkspace({ initialTrack }: { initialTrack: any }) {
           </div>
         </div>
       )}
+
+      {/* COMMAND PALETTE MODAL */}
+      {showCommandPalette && (() => {
+        const q = commandQuery.toLowerCase().trim();
+        
+        // Build searchable items
+        const items: Array<{ type: string; id: string; label: string; sub: string; noteType: "track" | "task" | "custom" | null; noteId: string | null }> = [];
+        
+        // General Notes
+        items.push({ type: "note", id: track.id, label: "General Overview Notes", sub: "Workspace", noteType: "track", noteId: track.id });
+        
+        // Custom Documents
+        (track.notesList || []).forEach(n => {
+          items.push({ type: "doc", id: n.id, label: n.title, sub: "Document", noteType: "custom", noteId: n.id });
+        });
+
+        // Tasks (flat, no phase grouping in palette)
+        allTasks.forEach(task => {
+          items.push({ type: "task", id: task.id, label: task.content, sub: "Checklist", noteType: "task", noteId: task.id });
+        });
+
+        const filtered = q ? items.filter(i => i.label.toLowerCase().includes(q) || i.sub.toLowerCase().includes(q)) : items;
+
+        const typeIcon = (type: string) => {
+          if (type === "note") return <FileText className="h-4 w-4 text-emerald-400" />;
+          if (type === "doc") return <NotebookPen className="h-4 w-4 text-violet-400" />;
+          return <Circle className="h-4 w-4 text-zinc-500" />;
+        };
+
+        return (
+          <div
+            className="fixed inset-0 z-[100] flex items-start justify-center pt-[15vh] bg-black/70 backdrop-blur-sm"
+            onClick={(e) => { if (e.target === e.currentTarget) setShowCommandPalette(false); }}
+          >
+            <div className="w-full max-w-lg bg-[#0d0d10] border border-border rounded-xl shadow-2xl overflow-hidden" style={{ boxShadow: '0 0 60px rgba(16,185,129,0.08), 0 25px 50px rgba(0,0,0,0.6)' }}>
+              {/* Search input */}
+              <div className="flex items-center gap-3 px-4 py-3.5 border-b border-border">
+                <Search className="h-4 w-4 text-muted shrink-0" />
+                <input
+                  ref={commandInputRef}
+                  type="text"
+                  placeholder="Search notes, tasks, phases..."
+                  value={commandQuery}
+                  onChange={(e) => setCommandQuery(e.target.value)}
+                  className="flex-1 bg-transparent text-sm text-zinc-100 placeholder:text-muted/60 focus:outline-none"
+                />
+                <kbd className="text-[10px] text-muted/60 font-mono bg-panel/60 border border-border/60 px-1.5 py-0.5 rounded">ESC</kbd>
+              </div>
+
+              {/* Results */}
+              <div className="max-h-[380px] overflow-y-auto custom-scrollbar py-1.5">
+                {filtered.length === 0 && (
+                  <div className="text-center py-8 text-muted text-sm">No results found</div>
+                )}
+                {filtered.map((item) => (
+                  <button
+                    key={`${item.type}-${item.id}`}
+                    onClick={() => {
+                      if (item.noteType && item.noteId) {
+                        handleSelectNote(item.noteType, item.noteId);
+                      }
+                      setShowCommandPalette(false);
+                    }}
+                    disabled={!item.noteType}
+                    className="w-full flex items-center gap-3 px-4 py-2.5 hover:bg-panel/50 transition-colors text-left group disabled:opacity-50 disabled:cursor-default"
+                  >
+                    <span className="shrink-0">{typeIcon(item.type)}</span>
+                    <div className="flex-1 min-w-0">
+                      <div className="text-sm text-zinc-200 truncate group-hover:text-white">{item.label}</div>
+                      <div className="text-[11px] text-muted font-mono truncate">{item.sub}</div>
+                    </div>
+                    {item.noteType && (
+                      <span className="text-[10px] text-muted/50 font-mono shrink-0">Open →</span>
+                    )}
+                  </button>
+                ))}
+              </div>
+
+              <div className="px-4 py-2 border-t border-border bg-[#0a0a0c]/80 flex items-center justify-between text-[10px] text-muted/50 font-mono">
+                <span>{filtered.length} result{filtered.length !== 1 ? "s" : ""}</span>
+                <span>↑↓ navigate · Enter select · Esc close</span>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* VERSION HISTORY MODAL */}
+      {showHistoryModal && (() => {
+        const noteKey = activeNote.type === "track" ? track.id : activeNote.id;
+        const snapshots = (versionHistory[noteKey] || []).slice().reverse();
+        const previewIdx = selectedHistoryIdx !== null ? selectedHistoryIdx : null;
+        const previewContent = previewIdx !== null ? snapshots[previewIdx]?.content ?? "" : "";
+
+        return (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/70 backdrop-blur-sm">
+            <div className="w-full max-w-3xl h-[80vh] rounded-xl border border-border bg-[#0d0d10] shadow-2xl flex flex-col overflow-hidden" style={{ boxShadow: '0 0 60px rgba(124,58,237,0.08), 0 25px 50px rgba(0,0,0,0.6)' }}>
+              {/* Header */}
+              <div className="flex items-center justify-between px-5 py-4 border-b border-border shrink-0">
+                <div className="flex items-center gap-2">
+                  <FileClock className="h-5 w-5 text-violet-400" />
+                  <h3 className="text-sm font-bold text-zinc-100">Version History</h3>
+                  <span className="text-xs text-muted font-mono ml-1">— {activeNoteTitle}</span>
+                </div>
+                <button onClick={() => setShowHistoryModal(false)} className="text-muted hover:text-zinc-200">
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+
+              <div className="flex flex-1 min-h-0">
+                {/* Snapshot list */}
+                <div className="w-52 shrink-0 border-r border-border overflow-y-auto custom-scrollbar bg-[#0a0a0c]/60">
+                  {snapshots.length === 0 ? (
+                    <div className="flex flex-col items-center justify-center h-full py-12 px-4 text-center">
+                      <History className="h-8 w-8 text-muted/30 mb-3" />
+                      <p className="text-xs text-muted">No snapshots yet.</p>
+                      <p className="text-[10px] text-muted/50 mt-1">Snapshots are captured each time your note auto-saves.</p>
+                    </div>
+                  ) : (
+                    <div className="py-1.5">
+                      {snapshots.map((snap, idx) => (
+                        <button
+                          key={idx}
+                          onClick={() => setSelectedHistoryIdx(idx)}
+                          className={cn(
+                            "w-full text-left px-3 py-2.5 border-b border-border/30 transition-colors",
+                            previewIdx === idx ? "bg-violet-500/10 border-l-2 border-l-violet-500" : "hover:bg-panel/40"
+                          )}
+                        >
+                          <div className="text-xs font-medium text-zinc-300 truncate">
+                            {idx === 0 ? "Latest" : `v${snapshots.length - idx}`}
+                          </div>
+                          <div className="text-[10px] text-muted font-mono mt-0.5">
+                            {snap.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+                          </div>
+                          <div className="text-[10px] text-muted/60 mt-0.5">
+                            {snap.content.split(/\s+/).filter(Boolean).length} words
+                          </div>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                {/* Preview pane */}
+                <div className="flex-1 flex flex-col min-w-0">
+                  {previewIdx === null ? (
+                    <div className="flex flex-col items-center justify-center h-full text-center text-muted">
+                      <RotateCcw className="h-8 w-8 text-muted/20 mb-3" />
+                      <p className="text-sm">Select a snapshot to preview</p>
+                      <p className="text-[11px] text-muted/50 mt-1 max-w-[240px]">You can restore any previous version of your note.</p>
+                    </div>
+                  ) : (
+                    <>
+                      <div className="px-4 py-2.5 border-b border-border shrink-0 flex items-center justify-between bg-[#0a0a0c]/60">
+                        <div className="text-[11px] font-mono text-muted">
+                          Snapshot from {snapshots[previewIdx]?.timestamp.toLocaleString([], { dateStyle: 'short', timeStyle: 'medium' })}
+                        </div>
+                        <button
+                          onClick={() => {
+                            if (confirm("Restore this version? Your current content will be replaced.")) {
+                              handleEditorChange(previewContent);
+                              setShowHistoryModal(false);
+                            }
+                          }}
+                          className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-violet-600 hover:bg-violet-500 text-white text-xs font-medium rounded-lg transition-colors"
+                        >
+                          <RotateCcw className="h-3 w-3" />
+                          Restore this version
+                        </button>
+                      </div>
+                      <div className="flex-1 overflow-y-auto custom-scrollbar p-4">
+                        <pre className="text-xs text-zinc-400 font-mono whitespace-pre-wrap leading-relaxed">{previewContent}</pre>
+                      </div>
+                    </>
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 }
 
-// Inline input for adding task rapidly
+// Inline input for adding task rapidly — always visible in the sidebar footer
 function AddTaskInline({ onAdd }: { onAdd: (content: string) => void }) {
-  const [active, setActive] = useState(false);
   const [val, setVal] = useState("");
 
   const submit = () => {
     if (val.trim()) {
-      onAdd(val);
+      onAdd(val.trim());
       setVal("");
     }
-    setActive(false);
   };
 
-  if (!active) {
-    return (
-      <button
-        onClick={() => setActive(true)}
-        className="w-full flex items-center gap-1 px-2.5 py-1.5 rounded hover:bg-panel/30 text-[11px] text-muted hover:text-zinc-300 transition-colors mt-1"
-      >
-        <Plus className="h-3 w-3" />
-        <span>Add checklist item...</span>
-      </button>
-    );
-  }
-
   return (
-    <div className="mt-1 flex items-center gap-1.5 px-2 py-1 rounded bg-panel/40 border border-border/60">
-      <Circle className="h-3 w-3 text-zinc-600 shrink-0" />
+    <div className="flex items-center gap-2 px-2 py-1.5 rounded-lg bg-panel/40 border border-border/60 hover:border-zinc-600 transition-colors">
+      <Plus className="h-3.5 w-3.5 text-muted shrink-0" />
       <input
         type="text"
-        placeholder="Type item name..."
+        placeholder="Add a task and press Enter..."
         value={val}
         onChange={(e) => setVal(e.target.value)}
         onKeyDown={(e) => {
           if (e.key === "Enter") submit();
-          if (e.key === "Escape") setActive(false);
+          if (e.key === "Escape") setVal("");
         }}
-        className="w-full bg-transparent text-xs text-zinc-200 placeholder:text-muted focus:outline-none"
-        autoFocus
-        onBlur={submit}
+        className="flex-1 bg-transparent text-xs text-zinc-200 placeholder:text-muted/60 focus:outline-none"
       />
     </div>
   );

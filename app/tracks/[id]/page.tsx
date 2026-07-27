@@ -2,7 +2,7 @@ import { notFound } from "next/navigation";
 import { prisma } from "@/lib/prisma";
 import { TrackWorkspace } from "@/components/track-workspace";
 
-export const revalidate = 0; // Disable caching so database updates are fresh
+export const revalidate = 0;
 
 export default async function TrackPage({
   params,
@@ -16,8 +16,15 @@ export default async function TrackPage({
         orderBy: { index: "asc" },
         include: { tasks: { orderBy: { order: "asc" } } },
       },
+      noteFolders: {
+        orderBy: { order: "asc" },
+        include: {
+          notes: { orderBy: { order: "asc" } },
+        },
+      },
       notesList: {
-        orderBy: { createdAt: "asc" },
+        where: { folderId: null }, // only unfiled notes
+        orderBy: { order: "asc" },
       },
     },
   });
